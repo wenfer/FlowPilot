@@ -7,7 +7,12 @@
   const DEFAULT_REGION = kiroStateApi?.DEFAULT_REGION || desktopClientApi?.DEFAULT_REGION || 'us-east-1';
   const DEFAULT_KIRO_PAGE_LOAD_TIMEOUT_MS = kiroTimeoutApi?.DEFAULT_KIRO_PAGE_LOAD_TIMEOUT_MS || (3 * 60 * 1000);
   const MAIL_2925_FILTER_LOOKBACK_MS = 10 * 60 * 1000;
+  const KIRO_REGISTER_PAGE_SOURCE_ID = 'kiro-register-page';
   const KIRO_DESKTOP_SOURCE_ID = 'kiro-desktop-authorize';
+  const KIRO_WEB_TAB_URL_PATTERNS = Object.freeze([
+    'https://app.kiro.dev/*',
+    'https://kiro.dev/*',
+  ]);
   const KIRO_AWS_VERIFICATION_CODE_PATTERNS = Object.freeze([
     Object.freeze({
       source: '(?:verification\\s*code|验证码|Your code is|code is)[：:\\s]*(\\d{6})',
@@ -141,6 +146,20 @@
 
   function getErrorMessage(error) {
     return error instanceof Error ? error.message : String(error ?? '未知错误');
+  }
+
+  function isKiroWebUrl(rawUrl = '') {
+    const normalizedUrl = cleanString(rawUrl);
+    if (!normalizedUrl) {
+      return false;
+    }
+    try {
+      const parsed = new URL(normalizedUrl);
+      const hostname = parsed.hostname.toLowerCase();
+      return hostname === 'app.kiro.dev' || hostname === 'kiro.dev';
+    } catch (_error) {
+      return false;
+    }
   }
 
   function parseDesktopCallbackUrl(rawUrl, expectedState = '', expectedPort = 0) {
@@ -345,6 +364,7 @@
       MAIL_2925_VERIFICATION_INTERVAL_MS = 15000,
       MAIL_2925_VERIFICATION_MAX_ATTEMPTS = 15,
       isTabAlive = async () => false,
+      KIRO_REGISTER_INJECT_FILES = null,
       KIRO_DESKTOP_AUTHORIZE_INJECT_FILES = null,
       pollCloudflareTempEmailVerificationCode = null,
       pollCloudMailVerificationCode = null,
@@ -650,6 +670,161 @@
       });
     }
 
+    async function collectKiroWebSessionTabs(currentState = {}) {
+      const runtimeState = readKiroRuntime(currentState);
+      const candidates = [];
+      const seen = new Set();
+      const addTab = (tab) => {
+        const tabId = Number(tab?.id);
+        if (!Number.isInteger(tabId) || seen.has(tabId) || !isKiroWebUrl(tab?.url)) {
+          return;
+        }
+        seen.add(tabId);
+        candidates.push(tab);
+      };
+
+      const registeredTabId = runtimeState.session?.registerTabId;
+      if (Number.isInteger(registeredTabId) && chrome?.tabs?.get) {
+        const tab = await chrome.tabs.get(registeredTabId).catch(() => null);
+        addTab(tab);
+      }
+
+      if (chrome?.tabs?.query) {
+        const queryKiroTabs = async (queryInfo) => {
+          const tabs = await chrome.tabs.query(queryInfo).catch(() => []);
+          for (const tab of tabs || []) {
+            addTab(tab);
+          }
+        };
+
+        await queryKiroTabs({ url: KIRO_WEB_TAB_URL_PATTERNS });
+        await queryKiroTabs({ active: true, currentWindow: true });
+      }
+
+      return candidates;
+    }
+
+    async function readKiroWebSessionStateFromTab(tabId, options = {}) {
+      const timeoutBudget = resolveTimeoutBudget(options);
+      if (typeof waitForTabStableComplete === 'function') {
+        await waitForTabStableComplete(tabId, {
+          timeoutMs: timeoutBudget.getRemainingMs(1000),
+          retryDelayMs: 300,
+          stableMs: Number(options.stableMs) || 1500,
+          initialDelayMs: Number(options.initialDelayMs) || 150,
+        });
+      }
+      if (typeof ensureContentScriptReadyOnTab === 'function') {
+        await ensureContentScriptReadyOnTab(KIRO_REGISTER_PAGE_SOURCE_ID, tabId, {
+          inject: Array.isArray(KIRO_REGISTER_INJECT_FILES) ? KIRO_REGISTER_INJECT_FILES : null,
+          injectSource: KIRO_REGISTER_PAGE_SOURCE_ID,
+          timeoutMs: timeoutBudget.getRemainingMs(1000),
+          retryDelayMs: 800,
+          logMessage: options.injectLogMessage || '步骤 7：正在连接已登录的 Kiro Web 页面...',
+        });
+      }
+      if (typeof sendToContentScriptResilient !== 'function') {
+        return null;
+      }
+      const stateWaitTimeoutMs = timeoutBudget.getRemainingMs(1000);
+      const result = await sendToContentScriptResilient(KIRO_REGISTER_PAGE_SOURCE_ID, {
+        type: 'GET_KIRO_REGISTER_PAGE_STATE',
+        step: 7,
+        source: 'background',
+      }, {
+        timeoutMs: stateWaitTimeoutMs,
+        retryDelayMs: 700,
+        responseTimeoutMs: Math.min(stateWaitTimeoutMs, 10000),
+        logMessage: '步骤 7：正在读取 Kiro Web 登录态...',
+      });
+      if (result?.error) {
+        throw new Error(result.error);
+      }
+      return result || null;
+    }
+
+    async function restoreKiroWebSessionFromOpenTabs(currentState = {}, nodeId = '') {
+      const runtimeState = readKiroRuntime(currentState);
+      const existingEmail = cleanString(runtimeState.register?.email || currentState?.email);
+      const registerCompleted = cleanString(runtimeState.register?.status) === 'completed';
+      const webSignedIn = cleanString(runtimeState.webAuth?.status) === 'signed_in';
+      if (existingEmail && registerCompleted && webSignedIn) {
+        return {
+          currentState,
+          runtimeState,
+          restored: false,
+        };
+      }
+
+      const tabs = await collectKiroWebSessionTabs(currentState);
+      let detectedSignedInWithoutEmail = false;
+      for (const tab of tabs) {
+        try {
+          const pageState = await readKiroWebSessionStateFromTab(tab.id, {
+            timeoutMs: DEFAULT_KIRO_PAGE_LOAD_TIMEOUT_MS,
+            injectLogMessage: '步骤 7：Kiro Web 页面内容脚本未就绪，正在等待页面恢复...',
+          });
+          if (pageState?.state !== 'kiro_web_signed_in') {
+            continue;
+          }
+          const detectedEmail = cleanString(pageState.accountEmail || pageState.email || existingEmail);
+          if (!detectedEmail) {
+            detectedSignedInWithoutEmail = true;
+            continue;
+          }
+
+          const restoredAt = Date.now();
+          const payload = await applyRuntimeState(currentState, {
+            session: {
+              currentStage: 'desktop-authorize',
+              registerTabId: tab.id,
+              pageState: pageState.state || '',
+              pageUrl: pageState.url || tab.url || '',
+              lastError: '',
+            },
+            register: {
+              email: detectedEmail,
+              status: 'completed',
+              completedAt: restoredAt,
+            },
+            webAuth: {
+              status: 'signed_in',
+              completedAt: restoredAt,
+            },
+            upload: {
+              status: 'waiting_desktop_authorize',
+              error: '',
+            },
+          }, {
+            email: detectedEmail,
+            accountIdentifierType: 'email',
+            accountIdentifier: detectedEmail,
+          });
+          const nextState = {
+            ...currentState,
+            ...payload,
+          };
+          await log(`步骤 7：检测到已有 Kiro Web 登录态，已恢复账号 ${detectedEmail}，继续启动桌面授权。`, 'ok', nodeId);
+          return {
+            currentState: nextState,
+            runtimeState: readKiroRuntime(nextState),
+            restored: true,
+          };
+        } catch (error) {
+          console.warn('[MultiPage:kiro-desktop-authorize] restore web session failed', {
+            tabId: tab?.id,
+            url: tab?.url,
+            message: getErrorMessage(error),
+          });
+        }
+      }
+
+      if (detectedSignedInWithoutEmail) {
+        throw new Error('已检测到 Kiro Web 登录态，但未能识别账号邮箱。请打开 Kiro 账号设置页后重试步骤 7。');
+      }
+      throw new Error('Kiro Web 登录态尚未建立。请先完成步骤 6，或打开已登录的 Kiro Web 页面后从步骤 7 继续。');
+    }
+
     function buildDesktopOtpPollPayload(step, state = {}, mail = {}, filterAfterTimestamp = 0) {
       const runtimeState = readKiroRuntime(state);
       const targetEmail = cleanString(runtimeState.register?.email || state?.email).toLowerCase();
@@ -779,16 +954,11 @@
 
     async function executeKiroStartDesktopAuthorize(state = {}) {
       const nodeId = String(state?.nodeId || 'kiro-start-desktop-authorize').trim();
-      const currentState = await getExecutionState(state);
+      let currentState = await getExecutionState(state);
       try {
-        const runtimeState = readKiroRuntime(currentState);
-        if (!cleanString(runtimeState.register?.email || currentState?.email)) {
-          throw new Error('缺少已注册邮箱，请先完成注册页步骤。');
-        }
-        if (cleanString(runtimeState.register?.status) !== 'completed'
-          || cleanString(runtimeState.webAuth?.status) !== 'signed_in') {
-          throw new Error('Kiro Web 登录态尚未建立，请先完成步骤 6。');
-        }
+        const sessionState = await restoreKiroWebSessionFromOpenTabs(currentState, nodeId);
+        currentState = sessionState.currentState;
+        const runtimeState = sessionState.runtimeState;
 
         const client = await desktopClientApi.registerDesktopClient({
           region: DEFAULT_REGION,

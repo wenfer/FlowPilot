@@ -10014,10 +10014,15 @@ async function skipNode(nodeId) {
   await setNodeStatus(normalizedNodeId, 'skipped');
   await addLog(`节点 ${normalizedNodeId} 已跳过`, 'warn');
 
-  if (normalizedNodeId === 'open-chatgpt') {
+  const linkedSkipNodeIdsByRoot = {
+    'open-chatgpt': ['submit-signup-email', 'fill-password', 'fetch-signup-code', 'fill-profile', 'wait-registration-success'],
+    'kiro-open-register-page': ['kiro-submit-email', 'kiro-submit-name', 'kiro-submit-verification-code', 'kiro-submit-password', 'kiro-complete-register-consent'],
+  };
+  const linkedSkipNodeIds = linkedSkipNodeIdsByRoot[normalizedNodeId] || [];
+  if (linkedSkipNodeIds.length) {
     const latestState = await getState();
     const skippedNodes = [];
-    for (const linkedNodeId of ['submit-signup-email', 'fill-password', 'fetch-signup-code', 'fill-profile', 'wait-registration-success']) {
+    for (const linkedNodeId of linkedSkipNodeIds) {
       const linkedStatus = latestState.nodeStatuses?.[linkedNodeId];
       const linkedNodeAllowed = typeof isNodeExecutionAllowedForState === 'function'
         ? isNodeExecutionAllowedForState(linkedNodeId, latestState)
@@ -10028,7 +10033,7 @@ async function skipNode(nodeId) {
       }
     }
     if (skippedNodes.length) {
-      await addLog(`节点 open-chatgpt 已跳过，节点 ${skippedNodes.join('、')} 也已同时跳过。`, 'warn');
+      await addLog(`节点 ${normalizedNodeId} 已跳过，节点 ${skippedNodes.join('、')} 也已同时跳过。`, 'warn');
     }
   }
 
@@ -13290,6 +13295,7 @@ const kiroRegisterRunner = self.MultiPageBackgroundKiroRegisterRunner?.createKir
   getState,
   HOTMAIL_PROVIDER,
   isTabAlive,
+  KIRO_REGISTER_INJECT_FILES,
   LUCKMAIL_PROVIDER,
   CLOUDFLARE_TEMP_EMAIL_PROVIDER,
   CLOUD_MAIL_PROVIDER,

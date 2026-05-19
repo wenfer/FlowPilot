@@ -85,9 +85,125 @@ test('kiro desktop authorize runner uses a shared 3-minute page-load timeout bud
 
 test('kiro desktop authorization is gated by completed Kiro Web sign-in', () => {
   const source = fs.readFileSync('background/kiro/desktop-authorize-runner.js', 'utf8');
-  assert.match(source, /runtimeState\.register\?\.status/);
-  assert.match(source, /runtimeState\.webAuth\?\.status/);
+  assert.match(source, /restoreKiroWebSessionFromOpenTabs/);
+  assert.match(source, /GET_KIRO_REGISTER_PAGE_STATE/);
   assert.match(source, /Kiro Web 登录态尚未建立/);
+  assert.match(source, /已检测到 Kiro Web 登录态/);
+});
+
+test('executeKiroStartDesktopAuthorize restores existing Kiro Web session before desktop auth', async () => {
+  const api = loadDesktopAuthorizeRunnerApi();
+  let currentState = {
+    kiroRuntime: {
+      session: {},
+      register: {},
+      webAuth: {},
+      desktopAuth: {},
+      upload: {},
+    },
+  };
+  const setStateCalls = [];
+  const logs = [];
+  let completedPayload = null;
+  let openedAuthorizeUrl = '';
+  let registerReadySource = '';
+  let desktopRegisteredTabId = null;
+
+  const runner = api.createKiroDesktopAuthorizeRunner({
+    addLog: async (message, level) => {
+      logs.push({ message, level });
+    },
+    chrome: {
+      tabs: {
+        get: async (tabId) => ({
+          id: tabId,
+          status: 'complete',
+          url: tabId === 77
+            ? 'https://app.kiro.dev/settings/account'
+            : 'https://oidc.us-east-1.amazonaws.com/authorize',
+        }),
+        query: async (queryInfo) => {
+          if (Array.isArray(queryInfo.url)) {
+            return [{
+              id: 77,
+              status: 'complete',
+              url: 'https://app.kiro.dev/settings/account',
+            }];
+          }
+          return [];
+        },
+        update: async () => ({}),
+      },
+      webNavigation: {
+        onBeforeNavigate: { addListener: () => {} },
+        onCommitted: { addListener: () => {} },
+      },
+      webRequest: {
+        onBeforeRequest: { addListener: () => {} },
+      },
+    },
+    completeNodeFromBackground: async (_nodeId, payload) => {
+      completedPayload = payload;
+    },
+    ensureContentScriptReadyOnTab: async (source, tabId, options = {}) => {
+      assert.equal(tabId, 77);
+      registerReadySource = source;
+      assert.equal(options.injectSource, 'kiro-register-page');
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      text: async () => JSON.stringify({
+        clientId: 'restored-client-id',
+        clientSecret: 'restored-client-secret',
+      }),
+    }),
+    getState: async () => currentState,
+    getTabId: async () => null,
+    isTabAlive: async () => false,
+    KIRO_REGISTER_INJECT_FILES: ['content/kiro/register-page.js'],
+    registerTab: async (source, tabId) => {
+      if (source === 'kiro-desktop-authorize') {
+        desktopRegisteredTabId = tabId;
+      }
+    },
+    reuseOrCreateTab: async (_source, url) => {
+      openedAuthorizeUrl = url;
+      return 88;
+    },
+    sendToContentScriptResilient: async (source, message) => {
+      assert.equal(source, 'kiro-register-page');
+      assert.equal(message.type, 'GET_KIRO_REGISTER_PAGE_STATE');
+      return {
+        ok: true,
+        state: 'kiro_web_signed_in',
+        url: 'https://app.kiro.dev/settings/account',
+        accountEmail: 'restored@duck.com',
+      };
+    },
+    setState: async (patch) => {
+      setStateCalls.push(patch);
+      currentState = { ...currentState, ...patch };
+    },
+    sleepWithStop: async () => {},
+    throwIfStopped: () => {},
+    waitForTabStableComplete: async () => ({ status: 'complete' }),
+  });
+
+  await runner.executeKiroStartDesktopAuthorize(currentState);
+
+  assert.equal(registerReadySource, 'kiro-register-page');
+  assert.equal(desktopRegisteredTabId, 88);
+  assert.match(openedAuthorizeUrl, /client_id=restored-client-id/);
+  assert.equal(currentState.email, 'restored@duck.com');
+  assert.equal(currentState.kiroRuntime.register.email, 'restored@duck.com');
+  assert.equal(currentState.kiroRuntime.register.status, 'completed');
+  assert.equal(currentState.kiroRuntime.webAuth.status, 'signed_in');
+  assert.equal(completedPayload?.kiroRuntime?.desktopAuth?.clientId, 'restored-client-id');
+  assert.equal(
+    logs.some(({ message }) => message.includes('检测到已有 Kiro Web 登录态，已恢复账号 restored@duck.com')),
+    true
+  );
+  assert.equal(setStateCalls.length >= 2, true);
 });
 
 test('executeKiroCompleteDesktopAuthorize finishes from callback page without waiting for tracker replay', async () => {

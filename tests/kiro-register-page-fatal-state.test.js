@@ -90,3 +90,18 @@ test('kiro register content treats Kiro web success callback as signed in', () =
 
   assert.equal(detected.state, 'kiro_web_signed_in');
 });
+
+test('kiro register content extracts signed-in account email from Kiro account page text', () => {
+  const harness = createHarness({
+    href: 'https://app.kiro.dev/settings/account',
+    hostname: 'app.kiro.dev',
+    title: 'Account',
+    bodyText: 'Account Email scrap-aged-quirk@duck.com support@kiro.dev',
+  });
+
+  const detected = harness.detectKiroRegisterPageState();
+
+  assert.equal(detected.state, 'kiro_web_signed_in');
+  assert.equal(detected.accountEmail, 'scrap-aged-quirk@duck.com');
+  assert.equal(detected.email, 'scrap-aged-quirk@duck.com');
+});
