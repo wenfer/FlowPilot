@@ -719,6 +719,7 @@ const HERO_SMS_COUNTRY_BY_PHONE_PREFIX = Object.freeze([
 const FIVE_SIM_OPERATOR = DEFAULT_FIVE_SIM_OPERATOR;
 const PLUS_PAYMENT_METHOD_PAYPAL = 'paypal';
 const PLUS_PAYMENT_METHOD_PAYPAL_HOSTED = 'paypal-hosted';
+const PLUS_PAYMENT_METHOD_NONE = 'none';
 const PLUS_PAYMENT_METHOD_GOPAY = 'gopay';
 const PLUS_PAYMENT_METHOD_GPC_HELPER = 'gpc-helper';
 const DEFAULT_PLUS_PAYMENT_METHOD = PLUS_PAYMENT_METHOD_PAYPAL_HOSTED;
@@ -823,6 +824,12 @@ function normalizePlusPaymentMethod(value = '') {
   const paypalHostedValue = typeof PLUS_PAYMENT_METHOD_PAYPAL_HOSTED !== 'undefined'
     ? PLUS_PAYMENT_METHOD_PAYPAL_HOSTED
     : 'paypal-hosted';
+  const noneValue = typeof PLUS_PAYMENT_METHOD_NONE !== 'undefined'
+    ? PLUS_PAYMENT_METHOD_NONE
+    : 'none';
+  if (normalized === noneValue || normalized === 'no-payment' || normalized === 'skip-payment') {
+    return noneValue;
+  }
   if (normalized === paypalHostedValue || normalized === 'paypal_direct' || normalized === 'paypal-direct') {
     return paypalHostedValue;
   }
@@ -1958,6 +1965,12 @@ function normalizePlusPaymentMethod(value = '') {
   const paypalHostedValue = typeof PLUS_PAYMENT_METHOD_PAYPAL_HOSTED !== 'undefined'
     ? PLUS_PAYMENT_METHOD_PAYPAL_HOSTED
     : 'paypal-hosted';
+  const noneValue = typeof PLUS_PAYMENT_METHOD_NONE !== 'undefined'
+    ? PLUS_PAYMENT_METHOD_NONE
+    : 'none';
+  if (normalized === noneValue || normalized === 'no-payment' || normalized === 'skip-payment') {
+    return noneValue;
+  }
   if (normalized === paypalHostedValue || normalized === 'paypal_direct' || normalized === 'paypal-direct') {
     return paypalHostedValue;
   }
@@ -8608,6 +8621,17 @@ function isLikelyLoggedInChatgptHomeUrl(rawUrl) {
   return !/^\/(?:auth\/|create-account\/|email-verification|log-in|add-phone)(?:[/?#]|$)/i.test(parsed.pathname || '');
 }
 
+function isStep5CompletionChatgptUrl(rawUrl) {
+  const parsed = parseUrlSafely(rawUrl);
+  if (!parsed) return false;
+  const protocol = String(parsed.protocol || '').toLowerCase();
+  const hostname = String(parsed.hostname || '').toLowerCase();
+  if (protocol !== 'https:' || !['chatgpt.com', 'www.chatgpt.com'].includes(hostname)) {
+    return false;
+  }
+  return !/^\/(?:auth\/|create-account\/|email-verification|log-in|add-phone)(?:[/?#]|$)/i.test(parsed.pathname || '');
+}
+
 function isSignupPasswordPageUrl(rawUrl) {
   if (typeof navigationUtils !== 'undefined' && navigationUtils?.isSignupPasswordPageUrl) {
     return navigationUtils.isSignupPasswordPageUrl(rawUrl);
@@ -9372,13 +9396,9 @@ function isGpcCheckoutRestartRequiredFailure(error) {
 
 function isPlusCheckoutRestartStep(step, stepExecutionKey = '', state = {}) {
   const normalizedKey = String(stepExecutionKey || '').trim();
-  if (normalizedKey === 'plus-checkout-create'
+  return normalizedKey === 'plus-checkout-create'
     || normalizedKey === 'plus-checkout-billing'
-    || normalizedKey === 'gopay-subscription-confirm') {
-    return true;
-  }
-  const numericStep = Number(step);
-  return Boolean(state?.plusModeEnabled) && (numericStep === 6 || numericStep === 7);
+    || normalizedKey === 'gopay-subscription-confirm';
 }
 
 function isPlusCheckoutRestartRequiredFailure(error) {
@@ -9633,10 +9653,23 @@ function getDownstreamStateResets(step, state = {}) {
       currentPhoneVerificationCountdownWindowTotal: 0,
     };
   }
-  if (step === 5 || step === 6 || step === 7 || step === 8) {
+  const normalizedStepKey = String(stepKey || '').trim();
+  const isEarlyRegistrationNode = [
+    'fill-profile',
+    'wait-registration-success',
+    'plus-checkout-create',
+  ].includes(normalizedStepKey);
+  const isBillingNode = normalizedStepKey === 'plus-checkout-billing';
+  const isApprovalNode = normalizedStepKey === 'paypal-approve'
+    || normalizedStepKey === 'gopay-subscription-confirm'
+    || normalizedStepKey === 'paypal-hosted-email'
+    || normalizedStepKey === 'paypal-hosted-card'
+    || normalizedStepKey === 'paypal-hosted-create-account'
+    || normalizedStepKey === 'paypal-hosted-review';
+  if (isEarlyRegistrationNode || isBillingNode || isApprovalNode) {
     return {
-      ...(step <= 6 ? plusRuntimeResets : {}),
-      ...(step === 7 ? {
+      ...(isEarlyRegistrationNode ? plusRuntimeResets : {}),
+      ...(isBillingNode ? {
         plusBillingCountryText: '',
         plusBillingAddress: null,
         plusPaypalApprovedAt: null,
@@ -9653,7 +9686,7 @@ function getDownstreamStateResets(step, state = {}) {
         gopayHelperOtpRequestId: '',
         gopayHelperOtpReferenceId: '',
       } : {}),
-      ...(step === 8 ? {
+      ...(isApprovalNode ? {
         plusPaypalApprovedAt: null,
         plusGoPayApprovedAt: null,
         plusReturnUrl: '',
@@ -9670,7 +9703,7 @@ function getDownstreamStateResets(step, state = {}) {
       currentPhoneVerificationCountdownWindowTotal: 0,
     };
   }
-  if (step === 9) {
+  if (stepKey === 'plus-checkout-return' || stepKey === 'confirm-oauth') {
     return {
       pendingPhoneActivationConfirmation: null,
       plusReturnUrl: '',
@@ -11556,6 +11589,13 @@ async function executeNodeAndWait(nodeId, delayAfter = 2000) {
     const completionSignalTimeoutMs = getNodeCompletionSignalTimeoutMs(normalizedNodeId, executionState);
     await addLog(`自动运行：节点 ${normalizedNodeId} 已发起，正在等待完成信号（超时 ${Math.round(completionSignalTimeoutMs / 1000)} 秒）。`, 'info');
     completionPayload = await executeNodeViaCompletionSignal(normalizedNodeId, completionSignalTimeoutMs);
+    if (normalizedNodeId === 'fill-profile') {
+      await addLog(
+        `步骤 5 [调试] 已收到资料页完成信号 | outcome=${String(completionPayload?.outcome || 'none')} | navigationStarted=${Boolean(completionPayload?.navigationStarted)} | url=${String(completionPayload?.url || '') || 'unknown'}`,
+        'info',
+        { step: 5, stepKey: 'fill-profile' }
+      );
+    }
     await addLog(`自动运行：节点 ${normalizedNodeId} 已收到完成信号，准备继续后续节点。`, 'info');
   } else {
     await executeNode(normalizedNodeId);
@@ -11573,6 +11613,12 @@ async function executeNodeAndWait(nodeId, delayAfter = 2000) {
       });
       try {
         await validateStep5PostCompletion(signupTabId, completionPayload || {});
+        await setNodeStatus(normalizedNodeId, 'completed');
+        await addLog('已完成', 'ok', { nodeId: normalizedNodeId });
+        await addLog('步骤 5 [调试] 资料页完成信号已通过后台复核。', 'ok', {
+          step: 5,
+          stepKey: 'fill-profile',
+        });
       } catch (step5ValidationError) {
         await setNodeStatus(normalizedNodeId, 'failed');
         await addLog(`失败：${getErrorMessage(step5ValidationError)}`, 'error', { nodeId: normalizedNodeId });
@@ -13548,6 +13594,7 @@ const step8Executor = self.MultiPageBackgroundStep8?.createStep8Executor({
   resolveSignupEmailForFlow,
   persistRegistrationEmailState,
   phoneVerificationHelpers,
+  getStepIdByKeyForState,
   rerunStep7ForStep8Recovery: (...args) => rerunStep7ForStep8Recovery(...args),
   resolveSignupMethod,
   reuseOrCreateTab,
@@ -13941,6 +13988,21 @@ const messageRouter = self.MultiPageBackgroundMessageRouter?.createMessageRouter
       currentState.password || currentState.customPassword || '',
       3
     );
+  },
+  finalizeStep5Completion: async (completionPayload = {}) => {
+    const signupTabId = await getTabId('openai-auth');
+    if (!signupTabId) {
+      throw new Error('步骤 5：缺少认证页标签页，无法确认是否已跳转到 https://chatgpt.com。');
+    }
+    await waitForTabStableComplete(signupTabId, {
+      timeoutMs: 120000,
+      retryDelayMs: 300,
+      stableMs: 1000,
+      initialDelayMs: 800,
+    });
+    await validateStep5PostCompletion(signupTabId, completionPayload || {});
+    await setNodeStatus('fill-profile', 'completed');
+    await addLog('已完成', 'ok', { nodeId: 'fill-profile' });
   },
   finalizeIcloudAliasAfterSuccessfulFlow,
   findHotmailAccount,
@@ -14753,18 +14815,69 @@ async function recoverStep5SubmitRetryPageOnTab(options = {}) {
   return result || {};
 }
 
+async function addStep5PostCompletionDebugLog(message, details = {}) {
+  const pageState = details?.pageState && typeof details.pageState === 'object'
+    ? details.pageState
+    : null;
+  const summary = [
+    `步骤 5 [调试] ${message}`,
+    details?.completionOutcome ? `completionOutcome=${details.completionOutcome}` : null,
+    `navigationStarted=${Boolean(details?.navigationStarted)}`,
+    details?.tabUrl ? `tabUrl=${details.tabUrl}` : null,
+    details?.completionUrl ? `completionUrl=${details.completionUrl}` : null,
+    pageState?.url ? `contentUrl=${pageState.url}` : null,
+    pageState ? `retryPage=${Boolean(pageState.retryPage)}` : null,
+    pageState ? `retryEnabled=${Boolean(pageState.retryEnabled)}` : null,
+    pageState ? `successState=${pageState.successState || 'none'}` : null,
+    pageState ? `profileVisible=${Boolean(pageState.profileVisible)}` : null,
+    pageState ? `unknownAuthPage=${Boolean(pageState.unknownAuthPage)}` : null,
+    pageState ? `maxCheckAttemptsBlocked=${Boolean(pageState.maxCheckAttemptsBlocked)}` : null,
+    pageState ? `userAlreadyExistsBlocked=${Boolean(pageState.userAlreadyExistsBlocked)}` : null,
+    pageState?.errorText ? `errorText=${pageState.errorText}` : null,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+
+  await addLog(summary, details?.level || 'info', {
+    step: 5,
+    stepKey: 'fill-profile',
+  });
+}
+
 async function validateStep5PostCompletion(tabId, completionPayload = {}) {
   if (!Number.isInteger(tabId)) {
     throw new Error('步骤 5：缺少有效的资料页标签页，无法确认提交后的最终状态。');
   }
+  const debugLog = typeof addStep5PostCompletionDebugLog === 'function'
+    ? addStep5PostCompletionDebugLog
+    : async (message, details = {}) => {
+        if (typeof addLog === 'function') {
+          await addLog(`步骤 5 [调试] ${message}`, details?.level || 'info', {
+            step: 5,
+            stepKey: 'fill-profile',
+          });
+        }
+      };
 
   const maxAuthRetryRecoveries = Math.max(1, Number(completionPayload?.maxAuthRetryRecoveries) || 2);
   let authRetryRecoveryCount = 0;
+  await debugLog('后台已收到资料页完成信号，准备开始最终状态复核。', {
+    completionOutcome: String(completionPayload?.outcome || '').trim(),
+    completionUrl: String(completionPayload?.url || '').trim(),
+    navigationStarted: Boolean(completionPayload?.navigationStarted),
+  });
 
   while (true) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     const currentUrl = String(tab?.url || completionPayload?.url || '').trim();
-    if (currentUrl && isLikelyLoggedInChatgptHomeUrl(currentUrl)) {
+    if (currentUrl && isStep5CompletionChatgptUrl(currentUrl)) {
+      await debugLog('后台直接通过标签页 URL 确认已进入 chatgpt.com，步骤 5 完成。', {
+        completionOutcome: String(completionPayload?.outcome || '').trim(),
+        completionUrl: String(completionPayload?.url || '').trim(),
+        navigationStarted: Boolean(completionPayload?.navigationStarted),
+        tabUrl: currentUrl,
+        level: 'ok',
+      });
       return {
         successState: 'logged_in_home',
         url: currentUrl,
@@ -14776,6 +14889,13 @@ async function validateStep5PostCompletion(tabId, completionPayload = {}) {
       responseTimeoutMs: 15000,
       retryDelayMs: 500,
       logMessage: '步骤 5：资料提交已触发页面跳转，正在确认最终页面状态...',
+    });
+    await debugLog('后台复核当前页面状态。', {
+      completionOutcome: String(completionPayload?.outcome || '').trim(),
+      completionUrl: String(completionPayload?.url || '').trim(),
+      navigationStarted: Boolean(completionPayload?.navigationStarted),
+      tabUrl: currentUrl,
+      pageState,
     });
 
     if (pageState.userAlreadyExistsBlocked) {
@@ -14790,6 +14910,14 @@ async function validateStep5PostCompletion(tabId, completionPayload = {}) {
         throw new Error(`步骤 5：资料提交后连续进入认证重试页 ${maxAuthRetryRecoveries} 次，页面仍未恢复。URL: ${pageState.url || currentUrl || 'unknown'}`);
       }
       authRetryRecoveryCount += 1;
+      await debugLog(`后台复核检测到认证重试页，准备恢复（${authRetryRecoveryCount}/${maxAuthRetryRecoveries}）。`, {
+        completionOutcome: String(completionPayload?.outcome || '').trim(),
+        completionUrl: String(completionPayload?.url || '').trim(),
+        navigationStarted: Boolean(completionPayload?.navigationStarted),
+        tabUrl: currentUrl,
+        pageState,
+        level: 'warn',
+      });
       await addLog(`步骤 5：提交完成信号后检测到认证重试页，正在自动恢复（${authRetryRecoveryCount}/${maxAuthRetryRecoveries}）...`, 'warn', {
         step: 5,
         stepKey: 'fill-profile',
@@ -14808,22 +14936,74 @@ async function validateStep5PostCompletion(tabId, completionPayload = {}) {
       continue;
     }
 
-    if (pageState.successState === 'logged_in_home' || pageState.successState === 'oauth_consent' || pageState.successState === 'add_phone') {
+    if (pageState.successState === 'logged_in_home' && isStep5CompletionChatgptUrl(pageState.url)) {
+      await debugLog(`后台复核确认成功状态：${pageState.successState}`, {
+        completionOutcome: String(completionPayload?.outcome || '').trim(),
+        completionUrl: String(completionPayload?.url || '').trim(),
+        navigationStarted: Boolean(completionPayload?.navigationStarted),
+        tabUrl: currentUrl,
+        pageState,
+        level: 'ok',
+      });
       return pageState;
     }
 
+    if (pageState.successState) {
+      await debugLog('后台复核发现非 chatgpt.com 的步骤 5 完成候选，按未完成处理。', {
+        completionOutcome: String(completionPayload?.outcome || '').trim(),
+        completionUrl: String(completionPayload?.url || '').trim(),
+        navigationStarted: Boolean(completionPayload?.navigationStarted),
+        tabUrl: currentUrl,
+        pageState,
+        level: 'error',
+      });
+      throw new Error(`步骤 5：资料提交后尚未跳转到 https://chatgpt.com，不能标记完成。当前状态：${pageState.successState}，URL: ${pageState.url || currentUrl || 'unknown'}`);
+    }
+
     if (pageState.errorText) {
+      await debugLog('后台复核发现页面错误文本，准备按失败结束。', {
+        completionOutcome: String(completionPayload?.outcome || '').trim(),
+        completionUrl: String(completionPayload?.url || '').trim(),
+        navigationStarted: Boolean(completionPayload?.navigationStarted),
+        tabUrl: currentUrl,
+        pageState,
+        level: 'error',
+      });
       throw new Error(`步骤 5：资料提交后页面返回错误：${pageState.errorText}。URL: ${pageState.url || currentUrl || 'unknown'}`);
     }
 
     if (pageState.profileVisible) {
+      await debugLog('后台复核发现页面仍停留在资料页，准备按失败结束。', {
+        completionOutcome: String(completionPayload?.outcome || '').trim(),
+        completionUrl: String(completionPayload?.url || '').trim(),
+        navigationStarted: Boolean(completionPayload?.navigationStarted),
+        tabUrl: currentUrl,
+        pageState,
+        level: 'error',
+      });
       throw new Error(`步骤 5：资料提交完成信号已收到，但页面仍停留在资料页，当前流程将直接报错。URL: ${pageState.url || currentUrl || 'unknown'}`);
     }
 
     if (pageState.unknownAuthPage) {
+      await debugLog('后台复核进入未知认证页，无法确认成功。', {
+        completionOutcome: String(completionPayload?.outcome || '').trim(),
+        completionUrl: String(completionPayload?.url || '').trim(),
+        navigationStarted: Boolean(completionPayload?.navigationStarted),
+        tabUrl: currentUrl,
+        pageState,
+        level: 'error',
+      });
       throw new Error(`步骤 5：资料提交后进入未识别的认证页，无法确认成功。URL: ${pageState.url || currentUrl || 'unknown'}`);
     }
 
+    await debugLog('后台复核未识别到成功或明确失败状态，准备按失败结束。', {
+      completionOutcome: String(completionPayload?.outcome || '').trim(),
+      completionUrl: String(completionPayload?.url || '').trim(),
+      navigationStarted: Boolean(completionPayload?.navigationStarted),
+      tabUrl: currentUrl,
+      pageState,
+      level: 'error',
+    });
     throw new Error(`步骤 5：资料提交后未能确认最终状态。URL: ${pageState.url || currentUrl || 'unknown'}`);
   }
 }
@@ -15615,6 +15795,7 @@ const step9Executor = self.MultiPageBackgroundStep9?.createStep9Executor({
   getStep8CallbackUrlFromNavigation,
   getStep8CallbackUrlFromTabUpdate,
   getStep8EffectLabel,
+  getStepIdByKeyForState,
   getTabId,
   getWebNavCommittedListener,
   getWebNavListener,

@@ -5,12 +5,14 @@
   const SIGNUP_METHOD_PHONE = 'phone';
   const PLUS_PAYMENT_METHOD_PAYPAL = 'paypal';
   const PLUS_PAYMENT_METHOD_PAYPAL_HOSTED = 'paypal-hosted';
+  const PLUS_PAYMENT_METHOD_NONE = 'none';
   const PLUS_PAYMENT_METHOD_GOPAY = 'gopay';
   const PLUS_PAYMENT_METHOD_GPC_HELPER = 'gpc-helper';
   const PLUS_ACCOUNT_ACCESS_STRATEGY_OAUTH = 'oauth';
   const PLUS_ACCOUNT_ACCESS_STRATEGY_SUB2API_CODEX_SESSION = 'sub2api_codex_session';
   const PLUS_ACCOUNT_ACCESS_STRATEGY_CPA_CODEX_SESSION = 'cpa_codex_session';
   const PLUS_PAYMENT_STEP_KEY = 'paypal-approve';
+  const PLUS_REGISTRATION_WAIT_STEP_KEY = 'wait-registration-success';
 
   function freezeDeep(entry) {
     if (!entry || typeof entry !== 'object' || Object.isFrozen(entry)) {
@@ -3014,12 +3016,87 @@
   ]
 });
 
+  const PLUS_PAYMENT_CHAIN_STEP_KEYS = Object.freeze([
+    'plus-checkout-create',
+    'plus-checkout-billing',
+    'paypal-approve',
+    'plus-checkout-return',
+    'paypal-hosted-email',
+    'paypal-hosted-card',
+    'paypal-hosted-create-account',
+    'paypal-hosted-review',
+    'gopay-subscription-confirm',
+  ]);
+
+  function omitPlusPaymentChainSteps(steps = []) {
+    return steps.filter((step) => !PLUS_PAYMENT_CHAIN_STEP_KEYS.includes(String(step?.key || '').trim()));
+  }
+
+  function reindexModeStepDefinitions(steps = []) {
+    return (Array.isArray(steps) ? steps : []).map((step, index) => ({
+      ...step,
+      id: index + 1,
+      order: (index + 1) * 10,
+    }));
+  }
+
+  function getPlusRegistrationWaitStep() {
+    const sourceStep = STEP_VARIANTS.normal.find((step) => step.key === PLUS_REGISTRATION_WAIT_STEP_KEY);
+    return {
+      ...(sourceStep || {
+        key: PLUS_REGISTRATION_WAIT_STEP_KEY,
+        title: '等待注册成功',
+        sourceId: 'chatgpt',
+        driverId: null,
+        command: PLUS_REGISTRATION_WAIT_STEP_KEY,
+        flowId: 'openai',
+      }),
+      id: 6,
+      order: 60,
+    };
+  }
+
+  function shiftPlusStepAfterRegistrationWait(step = {}) {
+    const nextStep = { ...step };
+    const id = Number(step.id);
+    const order = Number(step.order);
+    if (Number.isFinite(id)) {
+      nextStep.id = id + 1;
+    }
+    if (Number.isFinite(order)) {
+      nextStep.order = order + 10;
+    }
+    return nextStep;
+  }
+
+  function insertPlusRegistrationWaitStep(steps = []) {
+    if (!Array.isArray(steps) || steps.some((step) => step.key === PLUS_REGISTRATION_WAIT_STEP_KEY)) {
+      return steps;
+    }
+    const fillProfileIndex = steps.findIndex((step) => step.key === 'fill-profile');
+    if (fillProfileIndex < 0) {
+      return steps;
+    }
+    return steps.flatMap((step, index) => {
+      if (index < fillProfileIndex) {
+        return [step];
+      }
+      if (index === fillProfileIndex) {
+        return [step, getPlusRegistrationWaitStep()];
+      }
+      return [shiftPlusStepAfterRegistrationWait(step)];
+    });
+  }
+
   function isPlusModeEnabled(options = {}) {
     return Boolean(options?.plusModeEnabled || options?.plusMode);
   }
 
   function normalizePlusPaymentMethod(value = '') {
     const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === PLUS_PAYMENT_METHOD_NONE || normalized === 'no-payment' || normalized === 'skip-payment') {
+      return PLUS_PAYMENT_METHOD_NONE;
+    }
     if (normalized === PLUS_PAYMENT_METHOD_PAYPAL_HOSTED || normalized === 'paypal_direct' || normalized === 'paypal-direct') {
       return PLUS_PAYMENT_METHOD_PAYPAL_HOSTED;
     }
@@ -3118,13 +3195,27 @@
   }
 
   function getModeStepDefinitions(options = {}) {
-    return getVariantStepDefinitions(resolveVariantKey(options));
+    const isPlusMode = isPlusModeEnabled(options);
+    let steps = getVariantStepDefinitions(resolveVariantKey(options));
+    if (isPlusMode) {
+      steps = insertPlusRegistrationWaitStep(steps);
+    }
+    if (
+      isPlusMode
+      && normalizePlusPaymentMethod(options?.plusPaymentMethod || options?.paymentMethod) === PLUS_PAYMENT_METHOD_NONE
+    ) {
+      steps = omitPlusPaymentChainSteps(steps);
+    }
+    return reindexModeStepDefinitions(steps);
   }
 
   function getAllSteps() {
     const keyed = new Map();
-    Object.values(STEP_VARIANTS).forEach((steps) => {
-      (Array.isArray(steps) ? steps : []).forEach((step) => {
+    Object.entries(STEP_VARIANTS).forEach(([variantKey, steps]) => {
+      const variantSteps = String(variantKey || '').startsWith('plus')
+        ? insertPlusRegistrationWaitStep(steps)
+        : steps;
+      reindexModeStepDefinitions(variantSteps).forEach((step) => {
         keyed.set(`${step.id}:${step.key}`, step);
       });
     });

@@ -40,6 +40,7 @@
       testKiroRsConnection,
       finalizePhoneActivationAfterSuccessfulFlow,
       finalizeStep3Completion,
+      finalizeStep5Completion = null,
       finalizeIcloudAliasAfterSuccessfulFlow,
       findHotmailAccount,
       findPayPalAccount,
@@ -575,6 +576,12 @@
 
     function normalizePlusPaymentMethodForDisplay(value = '') {
       const normalized = String(value || '').trim().toLowerCase();
+      if (normalized === 'none' || normalized === 'no-payment' || normalized === 'skip-payment') {
+        return 'none';
+      }
+      if (normalized === 'paypal-hosted' || normalized === 'paypal_direct' || normalized === 'paypal-direct') {
+        return 'paypal-hosted';
+      }
       if (normalized === 'gpc-helper') {
         return 'gpc-helper';
       }
@@ -583,6 +590,12 @@
 
     function getPlusPaymentMethodLabel(value = '') {
       const method = normalizePlusPaymentMethodForDisplay(value);
+      if (method === 'none') {
+        return '无需支付';
+      }
+      if (method === 'paypal-hosted') {
+        return 'PayPal 无卡直绑';
+      }
       if (method === 'gpc-helper') {
         return 'GPC';
       }
@@ -995,13 +1008,21 @@
             return { ok: true, error: errorMessage };
           }
 
+          const deferCompletionUntilBackgroundValidation = nodeId === 'fill-profile';
           const completionStateCandidate = await getState();
           const nodeIds = typeof getNodeIdsForState === 'function' ? getNodeIdsForState(completionStateCandidate) : [];
           const lastNodeId = nodeIds[nodeIds.length - 1] || '';
           const isFinalNode = nodeId === lastNodeId;
           const completionState = isFinalNode ? completionStateCandidate : null;
-          await setNodeStatus(nodeId, 'completed');
-          await addLog('已完成', 'ok', { nodeId });
+          if (!deferCompletionUntilBackgroundValidation) {
+            await setNodeStatus(nodeId, 'completed');
+            await addLog('已完成', 'ok', { nodeId });
+          } else {
+            await addLog('步骤 5：已收到资料页完成信号，等待后台最终复核后再标记完成。', 'info', {
+              step: 5,
+              stepKey: nodeId,
+            });
+          }
           await handleStepData(resolvedStep, message.payload);
           if (isFinalNode && typeof appendAccountRunRecord === 'function') {
             await appendAccountRunRecord('success', completionState);
@@ -1272,7 +1293,10 @@
           }
           const executionState = await getState();
           if (doesNodeUseCompletionSignal(nodeId, executionState)) {
-            await executeNodeViaCompletionSignal(nodeId);
+            const completionPayload = await executeNodeViaCompletionSignal(nodeId);
+            if (nodeId === 'fill-profile' && typeof finalizeStep5Completion === 'function') {
+              await finalizeStep5Completion(completionPayload || {});
+            }
           } else {
             await executeNode(nodeId);
           }

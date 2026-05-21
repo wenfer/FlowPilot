@@ -2961,6 +2961,27 @@ function isLikelyLoggedInChatgptHomeUrl(rawUrl = location.href) {
   }
 }
 
+function isStep5CompletionChatgptUrl(rawUrl = location.href) {
+  const url = String(rawUrl || '').trim();
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const protocol = String(parsed.protocol || '').toLowerCase();
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (protocol !== 'https:' || !['chatgpt.com', 'www.chatgpt.com'].includes(host)) {
+      return false;
+    }
+
+    const path = String(parsed.pathname || '');
+    return !/^\/(?:auth\/|create-account\/|email-verification|log-in|add-phone)(?:[/?#]|$)/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
 function getStep4PostVerificationState(options = {}) {
   const { ignoreVerificationVisibility = false } = options;
   // Newer auth flows can briefly render profile fields before the email-verification
@@ -6693,39 +6714,9 @@ function getStep5PostSubmitSuccessState() {
     return null;
   }
 
-  if (isLikelyLoggedInChatgptHomeUrl()) {
+  if (isStep5CompletionChatgptUrl()) {
     return {
       state: 'logged_in_home',
-      url: location.href,
-    };
-  }
-
-  if (typeof isOAuthConsentPage === 'function' && isOAuthConsentPage()) {
-    return {
-      state: 'oauth_consent',
-      url: location.href,
-    };
-  }
-
-  if (typeof isAddPhonePageReady === 'function' && isAddPhonePageReady()) {
-    return {
-      state: 'add_phone',
-      url: location.href,
-    };
-  }
-
-  if (!isStep5ProfileStillVisible()) {
-    try {
-      const parsed = new URL(String(location.href || '').trim());
-      const host = String(parsed.hostname || '').toLowerCase();
-      if (['auth.openai.com', 'auth0.openai.com', 'accounts.openai.com'].includes(host)) {
-        return null;
-      }
-    } catch {
-      // Fall through to the generic "left_profile" success state.
-    }
-    return {
-      state: 'left_profile',
       url: location.href,
     };
   }
@@ -6764,6 +6755,29 @@ function getStep5SubmitState() {
   };
 }
 
+function logStep5SubmitDebug(message, options = {}) {
+  const resolvedState = options?.state && typeof options.state === 'object'
+    ? options.state
+    : getStep5SubmitState();
+  const summary = [
+    `url=${resolvedState?.url || location.href}`,
+    `retryPage=${Boolean(resolvedState?.retryPage)}`,
+    `retryEnabled=${Boolean(resolvedState?.retryEnabled)}`,
+    `successState=${resolvedState?.successState || 'none'}`,
+    `profileVisible=${Boolean(resolvedState?.profileVisible)}`,
+    `unknownAuthPage=${Boolean(resolvedState?.unknownAuthPage)}`,
+    `maxCheckAttemptsBlocked=${Boolean(resolvedState?.maxCheckAttemptsBlocked)}`,
+    `userAlreadyExistsBlocked=${Boolean(resolvedState?.userAlreadyExistsBlocked)}`,
+    resolvedState?.errorText ? `errorText=${resolvedState.errorText}` : null,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+  log(`步骤 5 [调试] ${message} | ${summary}`, options?.level || 'info', {
+    step: 5,
+    stepKey: 'fill-profile',
+  });
+}
+
 async function recoverStep5SubmitRetryPage(payload = {}) {
   return recoverCurrentAuthRetryPage({
     ...payload,
@@ -6780,14 +6794,21 @@ function installStep5NavigationCompletionReporter(completeOnce) {
   if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
     return () => {};
   }
+  const debugLog = typeof logStep5SubmitDebug === 'function'
+    ? logStep5SubmitDebug
+    : (message, options = {}) => {
+        if (typeof log === 'function') {
+          log(`步骤 5 [调试] ${message}`, options?.level || 'info', {
+            step: 5,
+            stepKey: 'fill-profile',
+          });
+        }
+      };
 
-  const onNavigationStarted = () => {
-    completeOnce({
-      navigationStarted: true,
-      outcome: {
-        state: 'navigation_started',
-        url: location.href,
-      },
+  const onNavigationStarted = (event) => {
+    const eventType = String(event?.type || 'navigation').trim() || 'navigation';
+    debugLog(`检测到页面开始导航（event=${eventType}）。`, {
+      level: 'warn',
     });
   };
 
@@ -6801,6 +6822,16 @@ function installStep5NavigationCompletionReporter(completeOnce) {
 }
 
 async function waitForStep5SubmitOutcome(options = {}) {
+  const debugLog = typeof logStep5SubmitDebug === 'function'
+    ? logStep5SubmitDebug
+    : (message, logOptions = {}) => {
+        if (typeof log === 'function') {
+          log(`步骤 5 [调试] ${message}`, logOptions?.level || 'info', {
+            step: 5,
+            stepKey: 'fill-profile',
+          });
+        }
+      };
   const {
     timeoutMs = 120000,
     maxAuthRetryRecoveries = 2,
@@ -6828,6 +6859,9 @@ async function waitForStep5SubmitOutcome(options = {}) {
         throw new Error(`步骤 5：资料提交后连续进入认证重试页 ${maxAuthRetryRecoveries} 次，页面仍未恢复。URL: ${location.href}`);
       }
       authRetryRecoveryCount += 1;
+      debugLog(`检测到资料提交后的认证重试页，准备执行恢复（${authRetryRecoveryCount}/${maxAuthRetryRecoveries}）。`, {
+        level: 'warn',
+      });
       log(`步骤 5：资料提交后进入认证重试页，正在自动恢复（${authRetryRecoveryCount}/${maxAuthRetryRecoveries}）...`, 'warn');
       await recoverCurrentAuthRetryPage({
         flow: 'signup',
@@ -6837,12 +6871,18 @@ async function waitForStep5SubmitOutcome(options = {}) {
         step: 5,
         timeoutMs: 12000,
       });
+      debugLog('认证重试页恢复动作已完成，准备继续等待最终结果。', {
+        level: 'info',
+      });
       lastSubmitClickAt = Date.now();
       continue;
     }
 
     const successState = getStep5PostSubmitSuccessState();
     if (successState) {
+      debugLog(`检测到资料提交成功状态：${successState.state || 'unknown'}`, {
+        level: 'ok',
+      });
       return successState;
     }
 
@@ -7146,8 +7186,23 @@ async function step5_fillNameBirthday(payload) {
   }
 
   let reportedCompletionPayload = null;
+  const debugLog = typeof logStep5SubmitDebug === 'function'
+    ? logStep5SubmitDebug
+    : (message, logOptions = {}) => {
+        if (typeof log === 'function') {
+          log(`步骤 5 [调试] ${message}`, logOptions?.level || 'info', {
+            step: 5,
+            stepKey: 'fill-profile',
+          });
+        }
+      };
   function completeStep5Once(extra = {}) {
+    const completionReason = extra?.outcome?.state
+      || (extra?.navigationStarted ? `navigation_started:${extra?.navigationEventType || 'unknown'}` : 'direct_completion');
     if (reportedCompletionPayload) {
+      debugLog(`忽略重复完成信号（reason=${completionReason}）。`, {
+        level: 'warn',
+      });
       return reportedCompletionPayload;
     }
 
@@ -7155,6 +7210,9 @@ async function step5_fillNameBirthday(payload) {
       isAgeMode,
       navigationStarted: Boolean(extra.navigationStarted),
       outcome: extra.outcome || null,
+    });
+    debugLog(`准备发送完成信号（reason=${completionReason}，isAgeMode=${isAgeMode}）。`, {
+      level: extra?.navigationStarted ? 'warn' : 'info',
     });
     reportedCompletionPayload = completionPayload;
     reportComplete(5, completionPayload);

@@ -552,6 +552,7 @@ const autoHintText = document.querySelector('.auto-hint');
 const stepsList = document.querySelector('.steps-list');
 const PLUS_PAYMENT_METHOD_PAYPAL = 'paypal';
 const PLUS_PAYMENT_METHOD_PAYPAL_HOSTED = 'paypal-hosted';
+const PLUS_PAYMENT_METHOD_NONE = 'none';
 const PLUS_PAYMENT_METHOD_GOPAY = 'gopay';
 const PLUS_PAYMENT_METHOD_GPC_HELPER = 'gpc-helper';
 const DEFAULT_GPC_HELPER_API_URL = 'https://gpc.qlhazycoder.top';
@@ -3075,7 +3076,11 @@ function normalizePlusPaymentMethod(value = '') {
   const gpcValue = typeof PLUS_PAYMENT_METHOD_GPC_HELPER !== 'undefined' ? PLUS_PAYMENT_METHOD_GPC_HELPER : 'gpc-helper';
   const paypalValue = typeof PLUS_PAYMENT_METHOD_PAYPAL !== 'undefined' ? PLUS_PAYMENT_METHOD_PAYPAL : 'paypal';
   const paypalHostedValue = typeof PLUS_PAYMENT_METHOD_PAYPAL_HOSTED !== 'undefined' ? PLUS_PAYMENT_METHOD_PAYPAL_HOSTED : 'paypal-hosted';
+  const noneValue = typeof PLUS_PAYMENT_METHOD_NONE !== 'undefined' ? PLUS_PAYMENT_METHOD_NONE : 'none';
   const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === noneValue || normalized === 'no-payment' || normalized === 'skip-payment') {
+    return noneValue;
+  }
   if (normalized === paypalHostedValue || normalized === 'paypal_direct' || normalized === 'paypal-direct') {
     return paypalHostedValue;
   }
@@ -9502,6 +9507,7 @@ function updatePhoneVerificationSettingsUI() {
 function updatePlusModeUI() {
   const paypalValue = typeof PLUS_PAYMENT_METHOD_PAYPAL !== 'undefined' ? PLUS_PAYMENT_METHOD_PAYPAL : 'paypal';
   const paypalHostedValue = typeof PLUS_PAYMENT_METHOD_PAYPAL_HOSTED !== 'undefined' ? PLUS_PAYMENT_METHOD_PAYPAL_HOSTED : 'paypal-hosted';
+  const noneValue = typeof PLUS_PAYMENT_METHOD_NONE !== 'undefined' ? PLUS_PAYMENT_METHOD_NONE : 'none';
   const gopayValue = typeof PLUS_PAYMENT_METHOD_GOPAY !== 'undefined' ? PLUS_PAYMENT_METHOD_GOPAY : 'gopay';
   const gpcValue = typeof PLUS_PAYMENT_METHOD_GPC_HELPER !== 'undefined' ? PLUS_PAYMENT_METHOD_GPC_HELPER : 'gpc-helper';
   const oauthStrategyValue = typeof PLUS_ACCOUNT_ACCESS_STRATEGY_OAUTH !== 'undefined'
@@ -9655,6 +9661,8 @@ function updatePlusModeUI() {
       ? `GPC ${isGpcAutoMode ? '自动' : '手动'}订阅链路`
       : method === gopayValue
       ? 'GoPay 印尼订阅链路'
+      : method === noneValue
+      ? '已有 Plus，无需配置支付链路'
       : method === paypalHostedValue
       ? 'PayPal 无卡直绑链路'
       : 'PayPal 订阅链路';

@@ -225,8 +225,8 @@
   );
   const NORMAL_STEP_DEFINITIONS = STEP_DEFINITIONS;
   const PLUS_STEP_DEFINITIONS = cloneSteps(
-    defaultWorkflowBuilder?.getVariantStepDefinitions
-      ? defaultWorkflowBuilder.getVariantStepDefinitions('plusPaypal')
+    defaultWorkflowBuilder?.getModeStepDefinitions
+      ? defaultWorkflowBuilder.getModeStepDefinitions({ plusModeEnabled: true })
       : [],
     { plusModeEnabled: true },
     DEFAULT_ACTIVE_FLOW_ID

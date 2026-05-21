@@ -36,6 +36,7 @@
       STANDARD_MAIL_VERIFICATION_RESEND_INTERVAL_MS,
       STEP7_MAIL_POLLING_RECOVERY_MAX_ATTEMPTS,
       throwIfStopped,
+      getStepIdByKeyForState = null,
     } = deps;
     let activeFetchLoginCodeStep = null;
     let activeFetchLoginCodeStepKey = 'fetch-login-code';
@@ -93,7 +94,17 @@
     }
 
     function getAuthLoginStepForVisibleStep(visibleStep) {
-      return visibleStep >= 11 ? 10 : 7;
+      return visibleStep >= 11 ? Math.max(1, visibleStep - 1) : 7;
+    }
+
+    function getAuthLoginStepForState(state = {}, visibleStep = 8) {
+      const authStep = typeof getStepIdByKeyForState === 'function'
+        ? Number(getStepIdByKeyForState('oauth-login', state))
+        : 0;
+      if (Number.isInteger(authStep) && authStep > 0) {
+        return authStep;
+      }
+      return getAuthLoginStepForVisibleStep(visibleStep);
     }
 
     async function getStep8ReadyTimeoutMs(actionLabel, expectedOauthUrl = '', visibleStep = 8) {
@@ -331,7 +342,7 @@
     }
 
     async function recoverStep8PollingFailure(currentState, visibleStep) {
-      const authLoginStep = getAuthLoginStepForVisibleStep(visibleStep);
+      const authLoginStep = getAuthLoginStepForState(currentState, visibleStep);
       try {
         const pageState = await ensureStep8VerificationPageReady({
           visibleStep,
@@ -771,7 +782,7 @@
         await chrome.tabs.update(authTabId, { active: true });
       } else {
         if (!state.oauthUrl) {
-          throw new Error(`缺少登录用 OAuth 链接，请先完成步骤 ${getAuthLoginStepForVisibleStep(visibleStep)}。`);
+          throw new Error(`缺少登录用 OAuth 链接，请先完成步骤 ${getAuthLoginStepForState(state, visibleStep)}。`);
         }
         await reuseOrCreateTab('openai-auth', state.oauthUrl);
       }
@@ -779,7 +790,7 @@
       throwIfStopped();
       let pageState = await ensureStep8VerificationPageReady({
         visibleStep,
-        authLoginStep: getAuthLoginStepForVisibleStep(visibleStep),
+        authLoginStep: getAuthLoginStepForState(state, visibleStep),
         allowPhoneVerificationPage: true,
         allowAddEmailPage: true,
         timeoutMs: await getStep8ReadyTimeoutMs('确认登录验证码页已就绪', state?.oauthUrl || '', visibleStep),
@@ -848,7 +859,7 @@
           return;
         } catch (err) {
           const visibleStep = getVisibleStep(currentState, 8);
-          const authLoginStep = getAuthLoginStepForVisibleStep(visibleStep);
+          const authLoginStep = getAuthLoginStepForState(currentState, visibleStep);
           let currentError = err;
           let retryWithoutStep7 = false;
 

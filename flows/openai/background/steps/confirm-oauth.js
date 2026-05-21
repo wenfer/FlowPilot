@@ -34,6 +34,7 @@
       setStep8PendingReject,
       setStep8TabUpdatedListener,
       shouldDeferStep9CallbackTimeout,
+      getStepIdByKeyForState = null,
     } = deps;
 
     const LOCALHOST_CALLBACK_LOCAL_TIMEOUT_MS = 240000;
@@ -45,7 +46,17 @@
     }
 
     function getAuthLoginStepForVisibleStep(visibleStep) {
-      return visibleStep >= 12 ? 10 : 7;
+      return visibleStep >= 12 ? Math.max(1, visibleStep - 3) : 7;
+    }
+
+    function getAuthLoginStepForState(state = {}, visibleStep = 9) {
+      const authStep = typeof getStepIdByKeyForState === 'function'
+        ? Number(getStepIdByKeyForState('oauth-login', state))
+        : 0;
+      if (Number.isInteger(authStep) && authStep > 0) {
+        return authStep;
+      }
+      return getAuthLoginStepForVisibleStep(visibleStep);
     }
 
     function addStepLog(step, message, level = 'info') {
@@ -57,7 +68,7 @@
       let activeState = state;
 
       if (!activeState.oauthUrl) {
-        const authLoginStep = getAuthLoginStepForVisibleStep(visibleStep);
+        const authLoginStep = getAuthLoginStepForState(activeState, visibleStep);
         throw new Error(`缺少登录用 OAuth 链接，请先完成步骤 ${authLoginStep}。`);
       }
 
