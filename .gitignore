@@ -6,6 +6,7 @@
 
 /data/account-run-history.txt
 /data/account-run-history.json
+/flowpilot-extension.zip
 .npm-test.log
 .omx/
 /node_modules
