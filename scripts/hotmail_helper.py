@@ -16,8 +16,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-HOST = "127.0.0.1"
-PORT = 17373
+HOST = os.environ.get("FLOWPILOT_HOST", "127.0.0.1")
+PORT = int(os.environ.get("FLOWPILOT_PORT", "17373"))
 LIVE_TOKEN_URL = "https://login.live.com/oauth20_token.srf"
 ENTRA_COMMON_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 ENTRA_CONSUMERS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
