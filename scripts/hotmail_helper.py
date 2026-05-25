@@ -799,6 +799,16 @@ class HotmailHelperHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.end_headers()
 
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            json_response(self, 200, {
+                "ok": True,
+                "status": "healthy",
+                "service": "FlowPilot Hotmail Helper"
+            })
+        else:
+            json_response(self, 404, {"ok": False, "error": f"Unsupported path: {self.path}"})
+
     def do_POST(self):
         try:
             payload = read_json_payload(self)
