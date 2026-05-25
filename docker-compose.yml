@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  flowpilot-helper:
+    image: ghcr.io/wenfer/flowpilot:latest
+    container_name: flowpilot-helper
+    restart: unless-stopped
+    ports:
+      - "17373:17373"
+    environment:
+      # Bind to all interfaces inside the container so it's accessible externally
+      - FLOWPILOT_HOST=0.0.0.0
+      - FLOWPILOT_PORT=17373
+    volumes:
+      # Persist account logs and execution snapshots locally in your host ./data folder
+      - ./data:/app/data
